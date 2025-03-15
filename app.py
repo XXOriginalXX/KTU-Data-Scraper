@@ -18,7 +18,13 @@ def get_ktu_data():
         return jsonify({"error": "Username and password are required"}), 400
     
     try:
+        # Create a session with SSL verification disabled
         session = requests.Session()
+        session.verify = False
+        
+        # Suppress only the specific InsecureRequestWarning
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         # Step 1: Login to KTU portal
         login_url = "https://app.ktu.edu.in/login.htm"
@@ -43,6 +49,7 @@ def get_ktu_data():
         if "Invalid Username or Password" in login_response.text:
             return jsonify({"error": "Invalid username or password"}), 401
         
+        # Rest of your code remains the same...
         # Step 2: Navigate to student profile
         student_url = "https://app.ktu.edu.in/eu/stu/studentDetails.htm"
         profile_page = session.get(student_url)
@@ -50,6 +57,7 @@ def get_ktu_data():
         # Step 3: Get the full profile
         full_profile_url = "https://app.ktu.edu.in/eu/stu/viewFullProfile.htm"
         full_profile_page = session.get(full_profile_url)
+        full_profile_soup = BeautifulSoup(full_profile_page.content, 'html.parser')
         
         # Step 4: Navigate to curriculum
         curriculum_url = "https://app.ktu.edu.in/eu/stu/curriculum.htm"
@@ -116,7 +124,6 @@ def get_ktu_data():
             'batch': 'N/A'
         }
         
-        name_element = full_profile_soup = BeautifulSoup(full_profile_page.content, 'html.parser')
         details_table = full_profile_soup.find('table', class_='ktu-table')
         
         if details_table:
