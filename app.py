@@ -37,16 +37,16 @@ def get_ktu_data():
         }
         session.headers.update(headers)
         
-        # Step 1: Login to KTU portal
+        # Step 1: Load the login page to get any tokens
         login_url = "https://app.ktu.edu.in/login.htm"
         login_page = session.get(login_url)
         soup = BeautifulSoup(login_page.content, 'html.parser')
         
         # Find the form and extract any hidden fields/tokens
-        form = soup.find('form', {'name': 'loginform'})  # Adjust the form selector if needed
+        form = soup.find('form', {'name': 'loginform'})
         if not form:
             debug_info['login_form'] = 'Form not found'
-            form = soup.find('form')  # Try to find any form
+            form = soup.find('form')
             if form:
                 debug_info['alternative_form'] = form.get('action', 'No action attribute')
             return jsonify({"error": "Login form not found", "debug": debug_info}), 500
@@ -90,100 +90,103 @@ def get_ktu_data():
         if "login" in login_response.url.lower():
             return jsonify({"error": "Login failed - still on login page", "debug": debug_info}), 401
         
-        # Step 2: Navigate to student profile
-        student_url = "https://app.ktu.edu.in/eu/stu/studentDetails.htm"
-        profile_page = session.get(student_url)
-        debug_info['profile_status'] = profile_page.status_code
-        debug_info['profile_url_after'] = profile_page.url
+        # Let's get the dashboard first to ensure we're properly logged in
+        dashboard_url = login_response.url  # This should be the dashboard URL
+        dashboard_page = session.get(dashboard_url)
+        debug_info['dashboard_status'] = dashboard_page.status_code
+        debug_info['dashboard_url'] = dashboard_url
         
-        # Check if we're redirected back to login
-        if "login" in profile_page.url.lower():
-            return jsonify({"error": "Session expired or login failed", "debug": debug_info}), 401
+        # Look for student specific links on the dashboard
+        dashboard_soup = BeautifulSoup(dashboard_page.content, 'html.parser')
+        student_links = dashboard_soup.find_all('a', href=True)
+        debug_info['dashboard_links'] = [link['href'] for link in student_links[:10]]  # First 10 links for debugging
         
-        # Step 3: Get the full profile
-        full_profile_url = "https://app.ktu.edu.in/eu/stu/viewFullProfile.htm"
-        full_profile_page = session.get(full_profile_url)
-        full_profile_soup = BeautifulSoup(full_profile_page.content, 'html.parser')
-        debug_info['full_profile_status'] = full_profile_page.status_code
-        debug_info['full_profile_url_after'] = full_profile_page.url
+        # Try to get the grade page directly
+        grade_page_url = "https://app.ktu.edu.in/eu/stu/grade.htm"
+        grade_page = session.get(grade_page_url)
+        grade_soup = BeautifulSoup(grade_page.content, 'html.parser')
+        debug_info['grade_page_status'] = grade_page.status_code
+        debug_info['grade_page_url'] = grade_page.url
         
-        # Step 4: Navigate to curriculum
-        curriculum_url = "https://app.ktu.edu.in/eu/stu/curriculum.htm"
-        curriculum_page = session.get(curriculum_url)
-        curriculum_soup = BeautifulSoup(curriculum_page.content, 'html.parser')
-        debug_info['curriculum_status'] = curriculum_page.status_code
-        debug_info['curriculum_url_after'] = curriculum_page.url
+        # Check if we're now on the grade page or redirected elsewhere
+        if "grade.htm" not in grade_page.url:
+            debug_info['grade_page_redirect'] = True
         
-        # Save part of the page content for debugging
-        debug_info['curriculum_content'] = curriculum_page.text[:500]  # First 500 chars
-        
-        # Extract CGPA
-        cgpa_element = curriculum_soup.find('div', string=lambda text: text and 'CGPA' in text)
+        # Try to find CGPA on the grade page
         cgpa = "N/A"
+        cgpa_element = grade_soup.find('div', string=lambda text: text and 'CGPA' in text if text else False)
         if cgpa_element:
             cgpa = cgpa_element.get_text().strip().split(':')[-1].strip()
             debug_info['cgpa_found'] = True
         else:
             debug_info['cgpa_found'] = False
-            # Try alternative methods to find CGPA
-            for div in curriculum_soup.find_all('div'):
-                if 'CGPA' in div.get_text():
-                    debug_info['possible_cgpa_div'] = div.get_text()
+            # Try other methods to find CGPA
+            for div in grade_soup.find_all('div'):
+                text = div.get_text().strip()
+                if text and 'CGPA' in text:
+                    cgpa = text.split(':')[-1].strip()
+                    debug_info['cgpa_found_alternative'] = True
+                    break
         
-        # Step 5: Extract all semester results
+        # Get semester results
         semester_results = {}
         
-        # Find all semester links
-        semester_links = curriculum_soup.find_all('a', href=lambda href: href and 'viewGradeCard.htm' in href)
+        # Find semester links from the grade page
+        semester_links = grade_soup.find_all('a', href=lambda href: href and 'viewResult' in href if href else False)
         debug_info['semester_links_count'] = len(semester_links)
         
         if len(semester_links) == 0:
             # Try to find any links for troubleshooting
-            all_links = curriculum_soup.find_all('a')
+            all_links = grade_soup.find_all('a')
             debug_info['all_links_count'] = len(all_links)
-            debug_info['all_links_sample'] = [link.get('href') for link in all_links[:5]]
+            debug_info['all_links_sample'] = [link.get('href') for link in all_links[:5] if link.get('href')]
+            
+            # Look for any tables that might contain semester data
+            result_tables = grade_soup.find_all('table')
+            debug_info['result_tables_count'] = len(result_tables)
+            
+            # Try to find semester data in the page content
+            semester_content = grade_soup.find('div', class_='col-md-12')
+            if semester_content:
+                debug_info['semester_content_found'] = True
+                
+                # Try to find tables in the content
+                tables = semester_content.find_all('table')
+                debug_info['content_tables_count'] = len(tables)
+                
+                # If we found tables, try to extract data from them
+                if tables:
+                    for i, table in enumerate(tables):
+                        rows = table.find_all('tr')
+                        semester_name = f"Semester {i+1}"
+                        courses = []
+                        
+                        for row in rows[1:]:  # Skip header row
+                            cols = row.find_all('td')
+                            if len(cols) >= 5:
+                                course = {
+                                    'code': cols[0].get_text().strip() if cols[0].get_text() else 'N/A',
+                                    'name': cols[1].get_text().strip() if cols[1].get_text() else 'N/A',
+                                    'credits': cols[2].get_text().strip() if cols[2].get_text() else 'N/A',
+                                    'grade': cols[3].get_text().strip() if cols[3].get_text() else 'N/A',
+                                    'result': cols[4].get_text().strip() if cols[4].get_text() else 'N/A'
+                                }
+                                courses.append(course)
+                        
+                        if courses:
+                            semester_results[semester_name] = {
+                                'courses': courses,
+                                'sgpa': 'N/A'  # We may not be able to extract SGPA
+                            }
         
-        for link in semester_links:
-            semester_name = link.get_text().strip()
-            semester_url = "https://app.ktu.edu.in" + link['href']
-            
-            # Navigate to semester grade card
-            grade_card_page = session.get(semester_url)
-            grade_card_soup = BeautifulSoup(grade_card_page.content, 'html.parser')
-            
-            # Extract course results
-            results_table = grade_card_soup.find('table', class_='ktu-table')
-            if results_table:
-                courses = []
-                rows = results_table.find_all('tr')[1:]  # Skip header row
-                
-                for row in rows:
-                    cols = row.find_all('td')
-                    if len(cols) >= 6:
-                        course = {
-                            'code': cols[0].get_text().strip(),
-                            'name': cols[1].get_text().strip(),
-                            'credits': cols[2].get_text().strip(),
-                            'grade': cols[3].get_text().strip(),
-                            'result': cols[4].get_text().strip()
-                        }
-                        courses.append(course)
-                
-                # Extract semester SGPA
-                sgpa_element = grade_card_soup.find('div', string=lambda text: text and 'SGPA' in text)
-                sgpa = "N/A"
-                if sgpa_element:
-                    sgpa = sgpa_element.get_text().strip().split(':')[-1].strip()
-                
-                semester_results[semester_name] = {
-                    'courses': courses,
-                    'sgpa': sgpa
-                }
-            
-            # Add a small delay to avoid overwhelming the server
-            time.sleep(1)
+        # Attempt to get student details from the profile page
+        profile_url = "https://app.ktu.edu.in/eu/stu/viewProfile.htm"
+        profile_page = session.get(profile_url)
+        profile_soup = BeautifulSoup(profile_page.content, 'html.parser')
+        debug_info['profile_page_status'] = profile_page.status_code
+        debug_info['profile_url_after'] = profile_page.url
         
-        # Step 6: Extract student details
+        # Try to get student details from the profile page
         student_details = {
             'name': 'N/A',
             'register_number': username,
@@ -191,31 +194,44 @@ def get_ktu_data():
             'batch': 'N/A'
         }
         
-        details_table = full_profile_soup.find('table', class_='ktu-table')
-        if details_table:
-            debug_info['details_table_found'] = True
-            rows = details_table.find_all('tr')
-            debug_info['details_table_rows'] = len(rows)
-            
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 2:
-                    label = cols[0].get_text().strip()
-                    value = cols[1].get_text().strip()
-                    
-                    if 'Name' in label:
-                        student_details['name'] = value
-                    elif 'Branch' in label:
-                        student_details['branch'] = value
-                    elif 'Batch' in label:
-                        student_details['batch'] = value
-        else:
-            debug_info['details_table_found'] = False
-            # Try to find any tables for troubleshooting
-            all_tables = full_profile_soup.find_all('table')
-            debug_info['all_tables_count'] = len(all_tables)
-            if len(all_tables) > 0:
-                debug_info['first_table_classes'] = all_tables[0].get('class', 'No class')
+        # Look for student details in any tables
+        tables = profile_soup.find_all('table')
+        debug_info['profile_tables_count'] = len(tables)
+        
+        if tables:
+            for table in tables:
+                rows = table.find_all('tr')
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) >= 2:
+                        label = cols[0].get_text().strip() if cols[0].get_text() else ''
+                        value = cols[1].get_text().strip() if cols[1].get_text() else ''
+                        
+                        if 'Name' in label:
+                            student_details['name'] = value
+                        elif 'Branch' in label:
+                            student_details['branch'] = value
+                        elif 'Batch' in label:
+                            student_details['batch'] = value
+        
+        # If we couldn't get student details from tables, try other methods
+        if student_details['name'] == 'N/A':
+            # Look for any elements with potential student information
+            for div in profile_soup.find_all('div'):
+                text = div.get_text().strip()
+                if text:
+                    if 'Name:' in text:
+                        student_details['name'] = text.split('Name:')[-1].strip().split('\n')[0]
+                    elif 'Branch:' in text:
+                        student_details['branch'] = text.split('Branch:')[-1].strip().split('\n')[0]
+                    elif 'Batch:' in text:
+                        student_details['batch'] = text.split('Batch:')[-1].strip().split('\n')[0]
+        
+        # Try to get name from the dashboard
+        if student_details['name'] == 'N/A':
+            user_name_element = dashboard_soup.find('div', class_='user-name')
+            if user_name_element:
+                student_details['name'] = user_name_element.get_text().strip()
         
         # Prepare the final response
         result = {
